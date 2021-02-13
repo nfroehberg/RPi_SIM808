@@ -25,7 +25,7 @@ if __name__=="__main__":
     sim.ftp_parameters(apn="INTERNET.EPLUS.DE", server="", port=21, user="", pwd="")
     sim.ftp_initialize()
     # create directory on FTP server
-    sim.ftp_dir_create_delete('test_dir',True)
+    sim.ftp_dir_create_delete('test_dir2',True)
     # upload file
     sim.ftp_file_send(file="test_file.txt",dir="/test_dir/")
 
