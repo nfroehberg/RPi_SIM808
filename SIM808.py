@@ -526,6 +526,133 @@ class SIM808():
                         continue
         return False
     
+    def ftp_list_decode(self,list,encoding,error=False):
+        output = {}
+        output['error'] = error
+        pattern = re.compile(encoding[0])
+        labels = encoding[1]
+        if 'type' in labels:
+            output['elements'] = {}
+            types = []
+            for element in list:
+                m = pattern.match(element)
+                if m:
+                    type = m.group(labels.index('type')+1)
+                    if type not in types:
+                        types.append(type)
+            for type in types:
+                output['elements'][type]=[]
+            for element in list:
+                dict = {}
+                m = pattern.match(element)
+                if m:
+                    for i in range(len(labels)):
+                         dict[labels[i]] = m.group(i+1)
+                    type = m.group(labels.index('type')+1)
+                    output['elements'][type].append(dict)
+                    
+        else:
+            output['elements'] = []
+            for element in list:
+                dict = {}
+                m = pattern.match(element)
+                if m:
+                    for i in range(len(labels)):
+                        dict[labels[i]] = m.group(i+1)
+                output['elements'].append(dict)
+        return output
+    
+    # encoding of list can vary between ftp servers
+    # common seems to be: ['([\w-]+)\s+(\d+)\s+(\w+)\s+(\w+)\s+(\d+)\s+(.+\s+.+\s+.+)\s+(.+)',['permissions','type','user','group','size','date/time','name']]
+    # encoding = [] gives raw list
+    # otherwise specify as [<regex pattern>,[<label0>,<label1>,...]]
+    def ftp_list_dir(self, dir, encoding=[],attempts=3):
+        for i in range(attempts):
+            # set directory
+            if not self.ftp_get_path(dir):
+                continue
+            # start ftp list session   
+            print('Opening FTP directory readout.')
+            if not self.write_simple_command('AT+FTPLIST=1'):
+                continue
+            
+            start = time.time()            
+            # using while loop to be able to reset counter
+            j=0
+            dir_list = b''
+            while j < 50:
+                j = j+1
+                try:
+                    line = self.port.readline().decode('utf-8')
+                except:
+                    continue
+                if line == '+FTPLIST: 1,0\r\n':
+                    # data transfer finished
+                    print('Data transfer complete.')
+                    if encoding == []:
+                        return dir_list.decode('utf-8').split('\r\n')
+                    else:
+                        return self.ftp_list_decode(dir_list.decode('utf-8').split('\r\n'),encoding)
+                        
+                elif line == '+FTPLIST: 1,1\r\n':
+                    print('Receiving Data.')
+                    # ftp list session is open
+                    
+                    block_finished = False
+                    for k in range(10):
+                        # request data
+                        self.port.write('AT+FTPLIST=2,1460\r\n'.encode('utf-8'))
+                        
+                        for l in range(attempts):
+                            try:
+                                line = self.port.readline().decode('utf-8')
+                            except:
+                                continue
+                            if line == '+FTPLIST: 2,0\r\n':
+                                self.port.readline()
+                                self.port.readline()
+                                # no data to report, try again
+                                break
+                            elif '+FTPLIST: 2,' in line:
+                                # data transmission is beginning
+                                # get size of data and read that many bytes
+                                pattern = re.compile('[+]FTPLIST: 2,(\d+)\\r\\n')
+                                m = pattern.match(line)
+                                size = m.group(1)
+                                chunk = self.port.read(int(size))
+                                dir_list = dir_list + chunk
+                                for i in range(20):
+                                    try:
+                                        line = self.port.readline().decode('utf-8')
+                                    except:
+                                        continue
+                                    if line == 'OK\r\n':
+                                        block_finished = True
+                                        #print('Block finished')
+                                        j=0 # reset loop to make sure data is transmitted independent of how many items are in dir
+                                        break
+                                # transmission of data block completed
+                                break
+                            if block_finished:
+                                break
+                        if block_finished:
+                            break
+                        
+                elif '+FTPLIST: 1,' in line:
+                    print(line)
+                    # error
+                    pattern = re.compile('[+]FTPLIST: 1,(\d+)\\r\\n')
+                    m = pattern.match(line)
+                    error = int(m.group(1))
+                    print('FTP Error:',self.ftp_errors[error])
+                    print(time.time()-start)
+                    
+                    if encoding == []:
+                        return dir_list.decode('utf-8').split('\r\n')
+                    else:
+                        return self.ftp_list_decode(dir_list.decode('utf-8').split('\r\n'),encoding,error=True)
+            return
+    
     # rssi 31 = best, 99 = error, rxqual 0 = best, 7 = worst, 99 = error
     def check_signal(self, attempts=3):
         for i in range(attempts):
