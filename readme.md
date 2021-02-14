@@ -14,3 +14,4 @@ It should run on any system with Python and most functions should work with the 
 - Check/change network operator
 - Read GPS data
 - List contents of ftp directory (though currently gives server error if there are too many items)
+- Read file size from FTP server and use for validation of successful file transfer

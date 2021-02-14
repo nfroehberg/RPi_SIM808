@@ -367,6 +367,7 @@ class SIM808():
         return self.write_simple_command('AT+FTPPUT=2,0', attempts)
     
     # if file is smaller than the max transfer length, it can be transferred as one chunk
+    # this function is not for direct use, file transfers including setup are implemented in ftp_file_send
     def ftp_put_file_small(self,data,attempts=3):
         for i in range(attempts):
             self.port.write('AT+FTPPUT=2,{}\r\n'.format(len(data)).encode('utf-8'))
@@ -393,6 +394,7 @@ class SIM808():
                                 return False
         return False
         
+    # this function is not for direct use, file transfers including setup are implemented in ftp_file_send
     def ftp_put_file_large(self,data,maxlength,attempts=3):
         size = len(data)
         pointer=0
@@ -443,8 +445,9 @@ class SIM808():
                 speed = int(chunk_size/duration)
                 print('Transferred {} of {} bytes ({} B/s, {} package errors).          '.format(pointer+chunk_size, size, speed,errors), end='\r')
         return False
-
-    def ftp_file_send(self,file,dir,attempts=3):
+    
+    # if validate = True, the correct file size on the FTP server is confirmed after the transfer 
+    def ftp_file_send(self,file,dir,validate=False,attempts=3):
         start_time = time.time()
         for i in range(attempts):
             # if any step fails, stop and restart procedure
@@ -474,7 +477,16 @@ class SIM808():
             duration = time.time()-start_time
             speed = int(len(f_data)/duration)
             print('Transfer of {} completed in {:.2f} seconds ({} B/s).'.format(file, duration, speed))
-            return True
+            
+            if validate:
+                if len(f_data) == self.ftp_get_filesize(dir,file,attempts=attempts):
+                    print("File size validated.")
+                    return True
+                else:
+                    print("File size does not match, attempt again:")
+                    continue
+            else:
+                return True
         print('Transfer of {} failed.'.format(file))
         return False
      
@@ -525,7 +537,36 @@ class SIM808():
                     else:
                         continue
         return False
-    
+        
+    def ftp_get_filesize(self,dir,file,attempts=3):
+        for i in range(attempts):
+            if not self.ftp_get_path(dir,attempts=attempts):
+                continue
+            if not self.ftp_get_name(file,attempts=attempts):
+                continue
+            if not self.write_simple_command('AT+FTPSIZE\r\n',attempts=attempts):
+                continue
+            for i in range(attempts*10):
+                line = self.port.readline()
+                try:
+                    line = line.decode('utf-8')
+                except:
+                    continue
+                if '+FTPSIZE: 1,0,' in line:
+                    pattern = re.compile('[+]FTPSIZE: 1,0,(\d+)\\r\\n')
+                    m = pattern.match(line)
+                    if m:
+                        return int(m.group(1))
+                    else:
+                        return 0
+                elif '+FTPSIZE: 1,' in line:
+                    pattern = re.compile('[+]FTPSIZE: 1,(\d+).*')
+                    m = pattern.match(line)
+                    error = int(m.group(1))
+                    print('Error',self.ftp_errors(error))
+                    return 0
+        return 0
+        
     def ftp_list_decode(self,list,encoding,error=False):
         output = {}
         output['error'] = error
