@@ -271,6 +271,9 @@ class SIM808():
         cmd = 'AT+FTPCID={}'.format(id)
         return self.write_simple_command(cmd, attempts)
         
+    def ftp_quit(self, attempts=3):
+        return self.write_simple_command('AT+FTPQUIT', attempts)
+        
     def bearer_set_connection_type(self, bearer=1, type="GPRS", attempts=3):
         cmd = 'AT+SAPBR=3,{},"Contype","{}"'.format(bearer,type)
         return self.write_simple_command(cmd, attempts)
@@ -365,9 +368,26 @@ class SIM808():
     
     def ftp_close_put_session(self,attempts=3):
         return self.write_simple_command('AT+FTPPUT=2,0', attempts)
+        
+    def ftp_file_delete(self,file,dir,attempts=3):
+        for i in range(attempts):
+            print('Deleting file.')
+            if not self.ftp_get_name(file,attempts=attempts):
+                continue
+            if not self.ftp_get_path(dir,attempts=attempts):
+                continue
+            if not self.write_simple_command('AT+FTPDELE') :
+                continue
+            for i in range(20):
+                line = self.port.readline()
+                if line == b'+FTPDELE: 1,0\r\n':
+                    print('Deleted {}.'.format(file))
+                    return True
+        print('Could not delete {}.'.format(file))
+        return False
     
     # if file is smaller than the max transfer length, it can be transferred as one chunk
-    # this function is not for direct use, file transfers including setup are implemented in ftp_file_send
+    # this function is not for direct use, file transfers including setup are implemented in ftp_file_upload
     def ftp_put_file_small(self,data,attempts=3):
         for i in range(attempts):
             self.port.write('AT+FTPPUT=2,{}\r\n'.format(len(data)).encode('utf-8'))
@@ -394,7 +414,7 @@ class SIM808():
                                 return False
         return False
         
-    # this function is not for direct use, file transfers including setup are implemented in ftp_file_send
+    # this function is not for direct use, file transfers including setup are implemented in ftp_file_upload
     def ftp_put_file_large(self,data,maxlength,attempts=3):
         size = len(data)
         pointer=0
@@ -423,7 +443,7 @@ class SIM808():
                                 break
                     continue
                 if chunk_size+1 < maxlength:
-                    print('Transferred {} of {} bytes ({} package errors).'.format(pointer+chunk_size,size,errors), end='\n')
+                    print('Transferred {} of {} bytes ({} package errors).                       '.format(pointer+chunk_size,size,errors), end='\n')
                     return True
                 for j in range(50):
                     try:
@@ -447,7 +467,7 @@ class SIM808():
         return False
     
     # if validate = True, the correct file size on the FTP server is confirmed after the transfer 
-    def ftp_file_send(self,file,dir,validate=False,attempts=3):
+    def ftp_file_upload(self,file,dir,validate=False,attempts=3):
         start_time = time.time()
         for i in range(attempts):
             # if any step fails, stop and restart procedure
@@ -489,6 +509,168 @@ class SIM808():
                 return True
         print('Transfer of {} failed.'.format(file))
         return False
+    
+    # local directory has to already exist or be created separately
+    def ftp_file_download(self,file,dir_server,dir_local='',validate=False,attempts=3):
+        
+        data = b'' 
+        chunk = b''
+        error = False
+        errors = []
+        download_open = False
+        download_complete = False
+        output = {}
+        file_start = time.time()
+        
+        for i in range(attempts):
+            if not self.ftp_get_name(file,attempts=attempts):
+                continue
+            if not self.ftp_get_path(dir_server,attempts=attempts):
+                continue
+            if not self.write_simple_command('AT+FTPREST=0',attempts=attempts):
+                continue
+                
+            if error:
+                self.write_simple_command('AT+FTPREST={}'.format(len(data)-len(chunk)),attempts=attempts)
+                data = data[:-len(chunk)]
+                error = False
+            
+            if not self.write_simple_command('AT+FTPGET=1',attempts=attempts):
+                continue
+                        
+            for j in range(75):
+                try:
+                    line = self.port.readline().decode('utf-8')
+                    #print(line)
+                except:
+                    continue
+                if line == '+FTPGET: 1,1\r\n':
+                    download_open = True
+                    break
+                if line == '+FTPGET: 1,0\r\n':
+                    download_complete = True
+                    break
+                if '+FTPGET: 1,' in line:
+                    pattern = re.compile('[+]FTPGET: 1,(\d+)\\r\\n')
+                    m = pattern.match(line)
+                    error = int(m.group(1))
+                    errors.append(error)
+                    error = True
+                    break
+                    
+            if error:
+                continue
+            if download_complete:
+                duration = time.time()-file_start
+                size = len(data)
+                speed = int(size/duration)
+                print('\nDownloaded {} in {:.1f} seconds({} bytes, {} B/s)'.format(file,duration,size,speed))
+                
+                if validate:
+                    if len(data) == self.ftp_get_filesize(dir_server,file):
+                        print('File size validated.')
+                    else:
+                        print('File size incorrect, attempt again.')
+                        error = True
+                        continue
+                        
+                output['errors'] = errors
+                output['data'] = data
+                output['complete'] = True
+                try:
+                    path = dir_local + file
+                    f = open(path,'wb')
+                    f.write(data)
+                    f.close()
+                except Exception as e:
+                    print('Could not write data to file.', e)
+                return output
+                
+            if download_open:
+                print('\nStarting download.')
+                j = 0
+                while j < 75:
+                    j = j+1 
+                    chunk_start = time.time()
+                    self.port.write('AT+FTPGET=2,1024\r\n'.encode('utf-8'))
+                    for k in range(100):
+                        try:
+                            line = self.port.readline().decode('utf-8')
+                            #print(line)
+                        except:
+                            continue
+                        if '+FTPGET: 2,' in line:
+                            pattern = re.compile('[+]FTPGET: 2,(\d+)\\r\\n')
+                            m = pattern.match(line)
+                            length = int(m.group(1))
+                            chunk = self.port.read(length)
+                            data = data + chunk
+                            print('Downloaded {} bytes ({} package errors).'.format(len(data),len(errors)), end='\r')
+                            j = 0
+                            break
+                        if line == '+FTPGET: 1,0\r\n':
+                            download_complete = True
+                            break
+                        if line == '+FTPGET: 1,1\r\n':
+                            download_open = True
+                        if '+FTPGET: 1,' in line:
+                            pattern = re.compile('[+]FTPGET: 1,(\d+)\\r\\n')
+                            m = pattern.match(line)
+                            error = int(m.group(1))
+                            errors.append(error)
+                            error = True
+                            break
+                            
+                    if error:
+                        break
+                        
+                    if download_complete:
+                        duration = time.time()-file_start
+                        size = len(data)
+                        speed = int(size/duration)
+                        print('\nDownloaded {} in {:.1f} seconds({} bytes, {} B/s)'.format(file,duration,size,speed))
+                        if validate:
+                            if len(data) == self.ftp_get_filesize(dir_server,file):
+                                print('File size validated.')
+                            else:
+                                print('File size incorrect, attempt again.')
+                                error = True
+                                break
+                        output['errors'] = errors
+                        output['data'] = data
+                        output['complete'] = True
+                        try:
+                            path = dir_local + file
+                            f = open(path,'wb')
+                            f.write(data)
+                            f.close()
+                        except Exception as e:
+                            print('Could not write data to file.', e)
+                        return output
+                        
+                    if download_open:
+                        j = 0
+                        continue
+            if error:
+                continue
+        
+        # return whatever was downloaded when attempts timed out      
+        output['errors'] = errors
+        output['data'] = data
+        output['complete'] = False
+        
+        duration = time.time()-file_start
+        size = len(data)
+        speed = int(size/duration)
+        print('\nDownload of {} interrupted after {:.1f} seconds({} bytes, {} B/s)'.format(file,duration,size,speed))
+        try:
+            path = dir_local + file
+            f = open(path,'wb')
+            f.write(data)
+            f.close()
+        except Exception as e:
+            print('Could not write data to file.', e)
+        return output
      
     # create = True for making dir, False for deleting dir     
     def ftp_dir_create_delete(self, dir, create, attempts=3):

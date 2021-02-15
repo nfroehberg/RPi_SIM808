@@ -9,8 +9,9 @@ It should run on any system with Python and most functions should work with the 
 ## Functionality implemented so far
 
 - Send/receive SMS
-- Upload files to FTP server
+- Upload/download files to/from FTP server
 - Create/Delete Directories on FTP server
+- Delete files on FTP server
 - Check/change network operator
 - Read GPS data
 - List contents of ftp directory (though currently gives server error if there are too many items)
