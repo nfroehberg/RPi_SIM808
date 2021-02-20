@@ -31,26 +31,62 @@ if __name__=="__main__":
 
 class SIM808():
     
-    def __init__(self, port="/dev/ttyAMA0", baud=115200, t_out=1, rtscts=False, xonxoff=False):
+    def __init__(self, port="/dev/ttyAMA0", baud=115200, t_out=1, rtscts=False, xonxoff=False, dtr_pin=0, pwr_pin=0):
         self.port = serial.Serial(port, baudrate=baud, timeout=t_out)
         self.ftp_errors = {1:'No Error',61:'Net Error',62:'DNS Error',63:'Connect Error',64:'Timeout',
                             65:'Server Error',66:'Operation not allowed', 70:'Replay Error',71:'User Error',
                             72:'Password Error',73:'Type Error',74:'Rest Error',75:'Passive error',
                             76:'Active error',77:'Operate Error',78:'Upload Error',79:'Download Error',
                             86:'Manual Quit'}
+        self.dtr_pin = dtr_pin
+        if dtr_pin != 0:
+            self.RPi = __import__('RPi')
+            self.RPi.GPIO.setmode(self.RPi.GPIO.BOARD)
+            self.RPi.GPIO.setup(self.dtr_pin, self.RPi.GPIO.OUT)      
+        self.pwr_pin = pwr_pin
+        if pwr_pin != 0:
+            self.RPi = __import__('RPi')
+            self.RPi.GPIO.setmode(self.RPi.GPIO.BOARD)
+            self.RPi.GPIO.setup(self.pwr_pin, self.RPi.GPIO.OUT)          
+            
     def __del__(self):
         # close serial port on destruction of object
         self.port.close()
         
+        #clear Gpio pins if used
+        if self.dtr_pin != 0 or self.pwr_pin != 0:
+            self.RPi.GPIO.cleanup()
+        
     def __repr__(self):
         return str(self.gps_read())
     
-    def ftp_parameters(self, apn, server, port, user, pwd):
-        self.apn = apn
-        self.ftp_server = server
-        self.ftp_port = port
-        self.ftp_user = user
-        self.ftp_pwd = pwd
+    # 0 = slow clock off, 1 = slow clock on, 2 = slow clock auto
+    # dtr pin needs to be connected and initialized for manual options
+    def standby(self,stby=1, attempts=3):
+        for i in range(attempts):
+            if stby == 1:
+                if self.dtr_pin == 0:
+                    return False
+                self.RPi.GPIO.output(self.dtr_pin,self.RPi.GPIO.HIGH)
+                if not self.write_simple_command('AT+CSCLK=1',attempts):
+                    continue
+                return True
+            if stby == 0:
+                if self.dtr_pin == 0:
+                    return False
+                self.RPi.GPIO.output(self.dtr_pin,self.RPi.GPIO.LOW)
+                self.port.write(b'AT+CSCLK=0\r\n')
+                time.sleep(3)
+                self.port.write(b'AT+CCID\r\n')
+                for i in range(attempts*3):
+                    if self.port.readline() != b'':
+                        return True
+                continue
+            if stby == 2:
+                if not self.write_simple_command('AT+CSCLK=2',attempts):
+                    continue
+                return True
+        return False
     
     # extract file name from full path    
     def get_file_from_path(self,path):
@@ -207,29 +243,137 @@ class SIM808():
                     return True
         print("Couldn't send command {}.".format(cmd[:-2]))
         return False
-        
+    
+    
+    def ftp_parameters(self, apn, server, port, user, pwd):
+        self.apn = apn
+        self.ftp_server = server
+        self.ftp_port = port
+        self.ftp_user = user
+        self.ftp_pwd = pwd
+    
     def ftp_initialize(self, attempts=5):
         print('Setting up FTP connection.')
         for i in range(attempts):
-            if not self.bearer_set_connection_type(bearer=1, type="GPRS"):
+            if not self.bearer_set_connection_type(bearer=1, type="GPRS",attempts=attempts):
                 continue
-            if not self.bearer_set_apn(bearer=1, apn=self.apn):
+            if not self.bearer_set_apn(bearer=1, apn=self.apn,attempts=attempts):
                 continue
-            if not self.bearer_open(bearer=1):
+            if not self.bearer_open(bearer=1,attempts=attempts):
                 continue
-            if not self.ftp_set_profile_id(1):
+            if not self.ftp_set_profile_id(1,attempts=attempts):
                 continue
-            if not self.ftp_set_server(self.ftp_server):
+            if not self.ftp_set_server(self.ftp_server,attempts=attempts):
                 continue
-            if not self.ftp_set_port(self.ftp_port):
+            if not self.ftp_set_port(self.ftp_port,attempts=attempts):
                 continue
-            if not self.ftp_set_username(self.ftp_user):
+            if not self.ftp_set_username(self.ftp_user,attempts=attempts):
                 continue
-            if not self.ftp_set_password(self.ftp_pwd):
+            if not self.ftp_set_password(self.ftp_pwd,attempts=attempts):
                 continue
             return True
         return False
-            
+        
+    def email_send(self,subject,message,recipient_to_address,recipient_to_name,recipient_cc_address='',
+                    recipient_cc_name='',recipient_bcc_address='',recipient_bcc_name='',attachment='',attempts=3):
+        for i in range(attempts):
+            if not self.email_set_recipient('to',recipient_to_address,recipient_to_name,attempts):
+                continue
+            if not self.email_set_subject(subject,attempts):
+                continue
+            self.port.write('AT+SMTPBODY={}\r\n'.format(len(message)).encode('utf-8'))
+            for j in range(5):
+                line = self.port.readline()
+                if line == b'DOWNLOAD\r\n':
+                    self.port.write(message.encode('utf-8'))
+                    break
+            for j in range(15):
+                line = self.port.readline()
+                if line == b'OK':
+                    break
+            self.port.write('AT+SMTPSEND\r\n'.encode('utf-8'))
+            for j in range(35):
+                print(self.port.readline())
+            return
+    
+    def email_parameters(self,apn,server,port,user,pwd,sender_address,sender_name,ssl=0,timeout=30,charset='UTF-8'):
+        self.apn = apn
+        self.email_timeout = timeout
+        self.email_charset = charset
+        self.email_server = server
+        self.email_port = port
+        self.email_user = user
+        self.email_pwd = pwd
+        self.email_sender_address = sender_address
+        self.email_sender_name = sender_name
+        self.email_ssl = ssl
+
+    def email_initialize(self, attempts=5):
+        for i in range(attempts):
+            print('Setting up SMTP connection.')
+            if not self.bearer_set_connection_type(bearer=1, type="GPRS",attempts=attempts):
+                continue
+            if not self.bearer_set_apn(bearer=1, apn=self.apn,attempts=attempts):
+                continue
+            if not self.bearer_open(bearer=1,attempts=attempts):
+                continue
+            if not self.email_set_profile_id(1,attempts=attempts):
+                continue
+            if not self.email_set_timeout(self.email_timeout,attempts=attempts):
+                continue
+            if not self.email_set_charset(self.email_charset,attempts=attempts):
+                continue
+            if not self.email_set_server(self.email_server,self.email_port,attempts=attempts):
+                continue
+            if not self.email_set_auth(self.email_user,self.email_pwd,attempts=attempts):
+                continue
+            if not self.email_set_sender(self.email_sender_address,self.email_sender_name,attempts=attempts):
+                continue
+            if not self.email_set_ssl(self.email_ssl,attempts=attempts):
+                continue
+            return True
+        return False
+    
+    # 0 Not use encrypted transmission 
+    # 1 Begin encrypt transmission with encryption port 
+    # 2 Begin encrypt transmission with normal port
+    def email_set_ssl(self, ssl, attempts=3):
+        cmd = 'AT+EMAILSSL={}'.format(ssl)
+        return self.write_simple_command(cmd, attempts)
+    
+    def email_set_subject(self, subject, attempts=3):
+        cmd = 'AT+SMTPSUB="{}"'.format(subject)
+        return self.write_simple_command(cmd, attempts)
+    
+    def email_set_charset(self, charset, attempts=3):
+        cmd = 'AT+SMTPCS="{}"'.format(charset)
+        return self.write_simple_command(cmd, attempts)
+    
+    def email_set_timeout(self, timeout, attempts=3):
+        cmd = 'AT+EMAILTO={}'.format(timeout)
+        return self.write_simple_command(cmd, attempts)
+        
+    def email_set_recipient(self,type,  recipient_address, recipient_name, attempts=3):
+        types = {'to':0,'cc':1,'bcc':2}
+        cmd = 'AT+SMTPRCPT={},0,"{}","{}"'.format(types[type],recipient_address,recipient_name)
+        return self.write_simple_command(cmd, attempts)
+        
+    def email_set_sender(self, sender_address, sender_name, attempts=3):
+        cmd = 'AT+SMTPFROM="{}","{}"'.format(sender_address,sender_name)
+        return self.write_simple_command(cmd, attempts)
+        
+    def email_set_auth(self, user, pwd, attempts=3):
+        cmd = 'AT+SMTPAUTH=1,"{}","{}"'.format(user,pwd)
+        return self.write_simple_command(cmd, attempts)
+    
+    def email_set_profile_id(self, id, attempts=3):
+        cmd = 'AT+EMAILCID={}'.format(id)
+        return self.write_simple_command(cmd, attempts)
+        
+    def email_set_server(self, server, port, attempts=3):
+        cmd = 'AT+SMTPSRV="{}",{}'.format(server,port)
+        return self.write_simple_command(cmd, attempts)
+
     # 0 = no flowcontrol, 1= software flowcontrol, 2 = hardware flowcontrol
     def flowcontrol_set(self,fc=0,attempts=3):
         cmd = 'AT+IFC={},{}'.format(fc,fc)
@@ -422,7 +566,6 @@ class SIM808():
         errors = 0
         for i in range(attempts):
             while True:
-                chunk_start_time = time.time()
                 chunk = data[pointer:(pointer+maxlength)]
                 chunk_size = len(chunk)
                 if not self.ftp_put_file_small(chunk,attempts=attempts):
@@ -461,9 +604,7 @@ class SIM808():
                             pointer = pointer+maxlength
                             maxlength=new_maxlength
                             break
-                duration = time.time()-chunk_start_time
-                speed = int(chunk_size/duration)
-                print('Transferred {} of {} bytes ({} B/s, {} package errors).          '.format(pointer+chunk_size, size, speed,errors), end='\r')
+                print('Transferred {} of {} bytes ({} package errors).          '.format(pointer+chunk_size, size, errors), end='\r')
         return False
     
     # if validate = True, the correct file size on the FTP server is confirmed after the transfer 
@@ -476,7 +617,7 @@ class SIM808():
                 continue
             if not self.ftp_put_path(dir):
                 continue
-            print('Opening FTP Put Session.')
+            print('\nOpening FTP Put Session.')
             ftp_open, ftp_error, ftp_maxlength = self.ftp_open_put_session()
             if not ftp_open:
                 self.ftp_initialize()
@@ -504,6 +645,7 @@ class SIM808():
                     return True
                 else:
                     print("File size does not match, attempt again:")
+                    self.ftp_file_delete(file,dir,attempts=attempts)
                     continue
             else:
                 return True
@@ -596,9 +738,15 @@ class SIM808():
                     for k in range(100):
                         try:
                             line = self.port.readline().decode('utf-8')
-                            #print(line)
+                            #print('1',line)
                         except:
                             continue
+                        if line == '+FTPGET: 2,0\r\n':
+                            #print('No data.')
+                            break
+                        if line == 'ERROR\r\n':
+                            error = True
+                            break
                         if '+FTPGET: 2,' in line:
                             pattern = re.compile('[+]FTPGET: 2,(\d+)\\r\\n')
                             m = pattern.match(line)
@@ -756,6 +904,7 @@ class SIM808():
         labels = encoding[1]
         if 'type' in labels:
             output['elements'] = {}
+            output['decoding_errors'] = []
             types = []
             for element in list:
                 m = pattern.match(element)
@@ -773,16 +922,21 @@ class SIM808():
                          dict[labels[i]] = m.group(i+1)
                     type = m.group(labels.index('type')+1)
                     output['elements'][type].append(dict)
+                else:
+                    output['decoding_errors'].append(element)
                     
         else:
             output['elements'] = []
+            output['decoding_errors'] = []
             for element in list:
                 dict = {}
                 m = pattern.match(element)
                 if m:
                     for i in range(len(labels)):
                         dict[labels[i]] = m.group(i+1)
-                output['elements'].append(dict)
+                    output['elements'].append(dict)  
+                else:
+                    output['decoding_errors'].append(element)
         return output
     
     # encoding of list can vary between ftp servers
@@ -791,6 +945,8 @@ class SIM808():
     # otherwise specify as [<regex pattern>,[<label0>,<label1>,...]]
     def ftp_list_dir(self, dir, encoding=[],attempts=3):
         for i in range(attempts):
+            error = False
+            transfer_complete = False
             # set directory
             if not self.ftp_get_path(dir):
                 continue
@@ -807,34 +963,64 @@ class SIM808():
                 j = j+1
                 try:
                     line = self.port.readline().decode('utf-8')
+                    #print('3',line)
                 except:
                     continue
-                if line == '+FTPLIST: 1,0\r\n':
+                if line == '+FTPLIST: 1,0\r\n' or transfer_complete:
                     # data transfer finished
                     print('Data transfer complete.')
                     if encoding == []:
                         return dir_list.decode('utf-8').split('\r\n')
                     else:
                         return self.ftp_list_decode(dir_list.decode('utf-8').split('\r\n'),encoding)
-                        
+                if line == b'ERROR\r\n':
+                    error = True
+                if '+FTPLIST: 2,' in line:
+                    # data transmission is beginning
+                    # get size of data and read that many bytes
+                    pattern = re.compile('[+]FTPLIST: 2,(\d+)\\r\\n')
+                    m = pattern.match(line)
+                    size = m.group(1)
+                    chunk = self.port.read(int(size))
+                    #print(chunk)
+                    dir_list = dir_list + chunk
+                    # transmission of data block completed
+                    continue
                 elif line == '+FTPLIST: 1,1\r\n':
                     print('Receiving Data.')
                     # ftp list session is open
                     
-                    block_finished = False
-                    for k in range(10):
+                    no_data = False
+                    k = 0
+                    while k <10:
+                        k = k+1
                         # request data
                         self.port.write('AT+FTPLIST=2,1460\r\n'.encode('utf-8'))
                         
                         for l in range(attempts):
                             try:
                                 line = self.port.readline().decode('utf-8')
+                                #print('1',line)
                             except:
                                 continue
+                            if line == b'ERROR\r\n':
+                                error = True
+                                break
+                            if line == '+FTPLIST: 1,0\r\n':
+                                transfer_complete = True
+                                break
                             if line == '+FTPLIST: 2,0\r\n':
-                                self.port.readline()
-                                self.port.readline()
-                                # no data to report, try again
+                                no_data = True
+                                for i in range(20):
+                                    try:
+                                        line = self.port.readline().decode('utf-8')
+                                        #print('2',line)
+                                    except:
+                                        continue
+                                    if line == 'OK\r\n':
+                                        #print('Okidoki')
+                                        j=0
+                                        break
                                 break
                             elif '+FTPLIST: 2,' in line:
                                 # data transmission is beginning
@@ -843,23 +1029,16 @@ class SIM808():
                                 m = pattern.match(line)
                                 size = m.group(1)
                                 chunk = self.port.read(int(size))
+                                #print(chunk)
                                 dir_list = dir_list + chunk
-                                for i in range(20):
-                                    try:
-                                        line = self.port.readline().decode('utf-8')
-                                    except:
-                                        continue
-                                    if line == 'OK\r\n':
-                                        block_finished = True
-                                        #print('Block finished')
-                                        j=0 # reset loop to make sure data is transmitted independent of how many items are in dir
-                                        break
+                                block_finished = True
+                                k=0
                                 # transmission of data block completed
                                 break
-                            if block_finished:
-                                break
-                        if block_finished:
+                        if transfer_complete or error:
                             break
+                elif error:
+                    continue
                         
                 elif '+FTPLIST: 1,' in line:
                     print(line)
@@ -874,26 +1053,9 @@ class SIM808():
                         return dir_list.decode('utf-8').split('\r\n')
                     else:
                         return self.ftp_list_decode(dir_list.decode('utf-8').split('\r\n'),encoding,error=True)
-            return
+            return[]
     
-    # rssi 31 = best, 99 = error, rxqual 0 = best, 7 = worst, 99 = error
-    def check_signal(self, attempts=3):
-        for i in range(attempts):
-            self.port.write('AT+CSQ\r\n'.encode('utf-8'))
-            pattern = re.compile('[+]CSQ: (\d+),(\d+)\\r\\n')
-            for j in range(5):
-                try:
-                    line = self.port.readline().decode('utf-8')
-                except:
-                    continue
-                m = pattern.match(line)
-                if m:
-                    rssi = m.group(1)
-                    rxqual = m.group(2)
-                    return {'rssi':rssi, 'rxqual':rxqual}
-        return {'rssi':99, 'rxqual':99}
-    
-    # get ccid of sim card (0 = error)
+        # get ccid of sim card (0 = error)
     def sim_get_ccid(self, attempts=3):
         for i in range(attempts):
             self.port.write('AT+CCID\r\n'.encode('utf-8'))

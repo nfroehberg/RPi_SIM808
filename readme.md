@@ -14,5 +14,6 @@ It should run on any system with Python and most functions should work with the 
 - Delete files on FTP server
 - Check/change network operator
 - Read GPS data
-- List contents of ftp directory (though currently gives server error if there are too many items)
+- List contents of ftp directory
 - Read file size from FTP server and use for validation of successful file transfer
+- use slow clock standby mode to save power (requires use of DTR pin on RPi GPIO)
