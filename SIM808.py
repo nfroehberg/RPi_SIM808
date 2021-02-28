@@ -40,25 +40,63 @@ class SIM808():
                             86:'Manual Quit'}
         self.dtr_pin = dtr_pin
         if dtr_pin != 0:
-            self.RPi = __import__('RPi')
-            self.RPi.GPIO.setmode(self.RPi.GPIO.BOARD)
-            self.RPi.GPIO.setup(self.dtr_pin, self.RPi.GPIO.OUT)      
+            import RPi.GPIO
+            self.gpio = RPi.GPIO
+            self.gpio.setmode(self.gpio.BOARD)
+            self.gpio.setup(self.dtr_pin, self.gpio.OUT)      
         self.pwr_pin = pwr_pin
         if pwr_pin != 0:
-            self.RPi = __import__('RPi')
-            self.RPi.GPIO.setmode(self.RPi.GPIO.BOARD)
-            self.RPi.GPIO.setup(self.pwr_pin, self.RPi.GPIO.OUT)          
+            import RPi.GPIO
+            self.gpio = RPi.GPIO
+            self.gpio.setmode(self.gpio.BOARD)
+            self.gpio.setup(self.pwr_pin, self.gpio.OUT)  
+            self.gpio.output(self.pwr_pin,self.gpio.HIGH)        
             
     def __del__(self):
         # close serial port on destruction of object
         self.port.close()
         
         #clear Gpio pins if used
-        if self.dtr_pin != 0 or self.pwr_pin != 0:
-            self.RPi.GPIO.cleanup()
+        if self.dtr_pin != 0:
+            self.gpio.cleanup(self.dtr_pin)
+        if self.pwr_pin != 0:
+            self.gpio.cleanup(self.pwr_pin)
         
     def __repr__(self):
         return str(self.gps_read())
+        
+    def power(self, on=True, attempts=3):
+        for i in range(attempts):
+            if on:
+                if self.standby(0,attempts=1):
+                    return True
+                else:
+                    self.power_toggle()
+                    if self.standby(0,attempts=attempts):
+                        return True
+                    else:
+                        continue
+            else:
+                self.port.write(b'AT+CPOWD=1\r\n')
+                self.port.write(b'AT+CCID\r\n')
+                failed = False
+                for i in range(attempts*3):
+                    if self.port.readline() != b'':
+                        failed  = True
+                        break
+                if failed:
+                    continue
+                else:
+                    return True
+        return False
+        
+    def power_toggle(self,duration=3):
+        if self.pwr_pin != 0:
+            self.gpio.output(self.pwr_pin,self.gpio.LOW)
+            time.sleep(duration)
+            self.gpio.output(self.pwr_pin,self.gpio.HIGH)
+            return True
+        return False
     
     # 0 = slow clock off, 1 = slow clock on, 2 = slow clock auto
     # dtr pin needs to be connected and initialized for manual options
@@ -67,19 +105,20 @@ class SIM808():
             if stby == 1:
                 if self.dtr_pin == 0:
                     return False
-                self.RPi.GPIO.output(self.dtr_pin,self.RPi.GPIO.HIGH)
+                self.gpio.output(self.dtr_pin,self.gpio.HIGH)
                 if not self.write_simple_command('AT+CSCLK=1',attempts):
                     continue
                 return True
             if stby == 0:
                 if self.dtr_pin == 0:
                     return False
-                self.RPi.GPIO.output(self.dtr_pin,self.RPi.GPIO.LOW)
+                self.gpio.output(self.dtr_pin,self.gpio.LOW)
                 self.port.write(b'AT+CSCLK=0\r\n')
                 time.sleep(3)
                 self.port.write(b'AT+CCID\r\n')
                 for i in range(attempts*3):
-                    if self.port.readline() != b'':
+                    line = self.port.readline() 
+                    if line != b'' and line != b'AT+CSCLK=0\r\n' and line != b'AT+CCID\r\n':
                         return True
                 continue
             if stby == 2:
@@ -276,7 +315,11 @@ class SIM808():
         
     def email_send(self,subject,message,recipient_to_address,recipient_to_name,recipient_cc_address='',
                     recipient_cc_name='',recipient_bcc_address='',recipient_bcc_name='',attachment='',attempts=3):
+        smtp_errors = {61:'Network error',62:'DNS resolve error',63:'SMTP TCP connection error',64:'Timeout of SMTP server response',
+                        65:'SMTP server response error',66:'No authentication',68:'Bad recipient',
+                        67:'Authentication failed. SMTP user name or password maybe not right.'}
         for i in range(attempts):
+            message = message.encode('utf-8').hex()
             if not self.email_set_recipient('to',recipient_to_address,recipient_to_name,attempts):
                 continue
             if not self.email_set_subject(subject,attempts):
@@ -289,12 +332,25 @@ class SIM808():
                     break
             for j in range(15):
                 line = self.port.readline()
-                if line == b'OK':
+                if line == b'OK\r\n':
                     break
             self.port.write('AT+SMTPSEND\r\n'.encode('utf-8'))
             for j in range(35):
-                print(self.port.readline())
-            return
+                line = self.port.readline()
+                #print(line)
+                if line == b'+SMTPSEND: 1\r\n':
+                    print('Email sent to {}.'.format(recipient_to_name))
+                    return True
+                elif b'+SMTPSEND:' in line:
+                    line = line.decode('utf-8')
+                    pattern = re.compile('[+]SMTPSEND: (\d+)\\r\\n')
+                    m = pattern.matchz(line)
+                    error = int(match.group(1))
+                    error = smtp_errors[error]
+                    print('Error sending Email: {}.'.format(error))
+                    return False
+
+            return False
     
     def email_parameters(self,apn,server,port,user,pwd,sender_address,sender_name,ssl=0,timeout=30,charset='UTF-8'):
         self.apn = apn
@@ -342,7 +398,7 @@ class SIM808():
         return self.write_simple_command(cmd, attempts)
     
     def email_set_subject(self, subject, attempts=3):
-        cmd = 'AT+SMTPSUB="{}"'.format(subject)
+        cmd = 'AT+SMTPSUB="{}"'.format(subject.encode('utf-8').hex())
         return self.write_simple_command(cmd, attempts)
     
     def email_set_charset(self, charset, attempts=3):
@@ -372,6 +428,10 @@ class SIM808():
         
     def email_set_server(self, server, port, attempts=3):
         cmd = 'AT+SMTPSRV="{}",{}'.format(server,port)
+        return self.write_simple_command(cmd, attempts)
+        
+    def clock_network_sync(self, on=1, attempts=3):
+        cmd = 'AT+CLTS={};&W'.format(on)
         return self.write_simple_command(cmd, attempts)
 
     # 0 = no flowcontrol, 1= software flowcontrol, 2 = hardware flowcontrol
